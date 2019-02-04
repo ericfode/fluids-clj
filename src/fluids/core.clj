@@ -1,10 +1,15 @@
 (ns fluids.core
   (:require
+   [fluids.gen :as g]
+
    [clojure.spec.alpha :as s]
+   [clojure.spec.test.alpha :as st]
+   [clojure.spec.gen.alpha :as gen]
    [uncomplicate.neanderthal.core :as nc]
    [uncomplicate.fluokitten.core :as fc]
    [uncomplicate.neanderthal.real :as nr]
    [uncomplicate.neanderthal.native :as nn]
+
    [clojure2d.core :as cc]
    [clojure2d.color :as color]))
 
@@ -28,7 +33,7 @@
 !*
 !* -05-26-18: A typo corrected for Lr: two**pi -> two*pi
 !*  thanks to Sinath at University of Tokyo.
-!* 
+!*
 !* This F90 program was written and made available for download
 !* for an educational purpose. Comments are welcome.
 !*
@@ -47,7 +52,7 @@
 !*
 !*           The two formulations have the same steady solution.
 !*
-!* Note: The first-order system is hyperbolic in the pseudo time, tau. 
+!* Note: The first-order system is hyperbolic in the pseudo time, tau.
 !*       The eigenvalues (wave speeds) are + nu/Lr, and - nu/Lr.
 !*
 !* Note: The first-order system is equivalent to the original diffusion equation
@@ -123,9 +128,10 @@
   ip = 2
 """)
 
-(s/def ::dv  (partial instance? (.getClass (nn/dv 1))))
+(s/def ::dv  nc/vctr?)
 
 (s/def ::x ::dv)
+
 (s/def ::vol ::dv)
 (s/def ::u ::dv)
 (s/def ::p ::dv)
@@ -215,9 +221,28 @@
 !          Grid ->  o-------o-----o-----o------o---o-----o---o
 !                  j=1            j    j+1                 j=nnodes
 """)
+(s/fdef nudge
+  :args (s/cat :x (s/with-gen
+                    (s/and ::dv #(= (nc/dim %) 4))
+                    #(g/ordered-dv-gen)))
+  :ret (s/and ::dv #(= (nc/dim %) 4))
+  :fn (fn [{:keys [args ret]}]
+        (let [x (:x args)]
+          (and
+           ;;The neighborhood should still be sorted
+           (< (nr/entry ret 0) (nr/entry ret 1))
+           (< (nr/entry ret 1) (nr/entry ret 2))
+
+           ;;The vectors should be references to the same object
+           ))))
+
 (defn nudge [x]
   "given a neighborhood of points in a vector and a rand [1 2 3 r]
-   nudges the vector [1 2+rand 3 r]"
+   rand is normalized to the size of the neighborhood
+   nudges the vector [1 2+rand 3 r]
+
+(nn/dge 3 10 (nn/dv (flatten (repeat 10 [1 2 3]))))
+"
   (let [jm1  (nr/entry x 0)
         j    (nr/entry x 1)
         jp1  (nr/entry x 2)
@@ -225,29 +250,81 @@
         l    (* 0.5  (+ jp1 jm1))
         m    (* 0.25 (- r 0.5))
         r2    (* 0.5 m (- jp1 jm1))]
-    (nr/entry! x 1 (+ l r2)))
-  x)
+    (nr/entry! x 1 (+ l r2))))
 
-(nn/dge 3 10 (nn/dv (flatten (repeat 10 [1 2 3]))) )
+
+(defn approx-uniform-step? [tolerance coll]
+  (let [diffs
+        (->> coll
+             (partition 2 1)
+             (map (partial apply -)))
+        [max-diff min-diff] ((juxt max min) diffs)]
+    (or (= max-diff min-diff)
+        (< (- max-diff min-diff) tolerance))))
+
+
+(s/fdef normalized-points
+  :args (s/cat :size  (s/int-in 2 10000))
+  :ret  (s/and (s/coll-of double?)
+               #(= 0.0 (first %))
+               #(= 1.0 (last %))
+               #(approx-uniform-step? 0.0001 %))
+  :fn   (fn [{:keys [args ret]}]
+          (let [size (:size args)]
+            (= (count ret) size))))
+
+(defn normalized-points [size]
+  (let [h (/ 1 (dec size))]
+    (into []
+          (fc/fmap
+           (fn [x] (double (* h (- x 1))))
+           (range 1 (inc size))))))
+
+(defn points-gen  [&{:keys [min-size max-size]
+                     :or {min-size 2 max-size 1000}}]
+  (gen/fmap
+   (fn [size]
+     [(normalized-points size)
+      (flatten [0.0  (repeatedly (- size 2) rand) 0.0])])
+   (s/gen (s/int-in min-size max-size))))
+
+(s/fdef offset-matrix
+  :args (s/with-gen
+          (s/cat :points (s/coll-of double?)
+                 :rands (s/coll-of double?))
+          #(points-gen))
+  :ret  nc/matrix?
+  :fn   (fn [{:keys [args ret]}]
+          (let [points-size  (count (:points args))
+                rands-size   (count (:rangs args))
+                ret-size     (nc/dim ret)]
+            (= points-size rands-size)
+            (= (nc/row ret 1) (nn/dv (:points args)))
+            (= (nc/row ret 3) (nn/dv (:rands args)))
+            (= ret-size (* 4 points-size)))))
+`
+(defn offset-matrix [points rands]
+  (let [size (count points)]
+    (nn/dge 4 size (interleave (cons 0.0 (drop-last points))
+                                points
+                                (conj (rest points) 1.0)
+                                rands))))
 
 (defn irregular-grid [size]
-  (let [h (/ 1.0 (-  size 1.0))
-        points         (into [] (fc/fmap (fn [^double x] ^double (* h (- x 1))) (range 1 (inc size))))
+  "Returns a normailized irregular grid"
+  (let [points         (normalized-points size)
         rands          (flatten [0  (repeatedly (- size 2) rand) 0])
-        matrix         (nn/dge 4  size  (interleave (flatten [0 (drop-last points)])
-                                                    points
-                                                    (flatten [(rest points) 1.0])
-                                                    rands))
-        preturb-matrix (nc/submatrix matrix 0 1 3 (- size 2))
-        preturbed      (fc/fmap nudge (nc/cols preturb-matrix))
-        ]
+        matrix         (offset-matrix points rands)
+        preturb-matrix (nc/submatrix matrix 4 size)
+        preturbed      (fc/fmap nudge (nc/cols preturb-matrix))]
  ;   matrix
-    (nc/submatrix matrix 1 0 1 size)
+   preturbed
+;    (nc/submatrix preturbed 1 0 1 size)
   ))
 
-(take 5 (nc/cols
 
-         (irregular-grid 10)
+(take 5 (nc/rows
+         (irregular-grid 3)
 
          ))
 
@@ -268,25 +345,25 @@
     (partition 2 1 wavy-line)) )
 
 (partition 2 1 (irregular-grid 10))
+
 (def g (irregular-grid 10))
 
 (defn drawer
   [canvas window ^long frameno state]
-  (-> canvas 
-;      (cc/set-background 0 0 0)
+  (-> canvas
+      (cc/set-background 0 0 0)
       (cc/set-color 255 255 255)
-
       (draw-lines
-       canvas
        g )))
 
-(def window (cc/show-window {:canvas (cc/canvas 200 200 :mid) ;; create canvas with mid quality
-                          :window-name "ellipse"             ;; name window
-                          :w 400 ;; size of window (twice as canvas)
-                          :h 400
-                             :fps 10
-                          :hint :mid ;; hint for drawing canvas on window, mid quality (affects scalling 200 -> 400)
-                          :draw-fn  drawer})) ;; draw callback funtion
+(def window (cc/show-window
+             {:canvas (cc/canvas 200 200 :mid) ; create canvas with mid quality
+              :window-name "ellipse"           ; name window
+              :w 400                           ; size of window (twice as canvas)
+              :h 400
+              :fps 10
+              :hint :mid ;; hint for drawing canvas on window, mid quality (affects scalling 200 -> 400)
+              :draw-fn  drawer})) ;; draw callback funtion
 
 (cc/close-window
  window
