@@ -9,9 +9,10 @@
    [uncomplicate.fluokitten.core :as fc]
    [uncomplicate.neanderthal.real :as nr]
    [uncomplicate.neanderthal.native :as nn]
+   [uncomplicate.neanderthal.math :as nm]
 
-   [clojure2d.core :as cc]
-   [clojure2d.color :as color]))
+   ))
+
 
 
 (comment
@@ -227,14 +228,10 @@
                     #(g/ordered-dv-gen)))
   :ret (s/and ::dv #(= (nc/dim %) 4))
   :fn (fn [{:keys [args ret]}]
-        (let [x (:x args)]
-          (and
-           ;;The neighborhood should still be sorted
-           (< (nr/entry ret 0) (nr/entry ret 1))
-           (< (nr/entry ret 1) (nr/entry ret 2))
-
-           ;;The vectors should be references to the same object
-           ))))
+        (and
+         ;;The neighborhood should still be sorted
+         (< (nr/entry ret 0) (nr/entry ret 1))
+         (< (nr/entry ret 1) (nr/entry ret 2)))))
 
 (defn nudge [x]
   "given a neighborhood of points in a vector and a rand [1 2 3 r]
@@ -251,7 +248,6 @@
         m    (* 0.25 (- r 0.5))
         r2    (* 0.5 m (- jp1 jm1))]
     (nr/entry! x 1 (+ l r2))))
-
 
 (defn approx-uniform-step? [tolerance coll]
   (let [diffs
@@ -302,7 +298,7 @@
             (= (nc/row ret 1) (nn/dv (:points args)))
             (= (nc/row ret 3) (nn/dv (:rands args)))
             (= ret-size (* 4 points-size)))))
-`
+
 (defn offset-matrix [points rands]
   (let [size (count points)]
     (nn/dge 4 size (interleave (cons 0.0 (drop-last points))
@@ -315,94 +311,87 @@
   (let [points         (normalized-points size)
         rands          (flatten [0  (repeatedly (- size 2) rand) 0])
         matrix         (offset-matrix points rands)
-        preturb-matrix (nc/submatrix matrix 4 size)
+        preturb-matrix (nc/submatrix matrix  0 1  4  (dec size))
         preturbed      (fc/fmap nudge (nc/cols preturb-matrix))]
- ;   matrix
-   preturbed
-;    (nc/submatrix preturbed 1 0 1 size)
-  ))
+    (nn/dv
+     (cons 0.0
+           (fc/fmap #(nr/entry % 1)
+                    preturbed)))))
 
 
-(take 5 (nc/rows
-         (irregular-grid 3)
+(irregular-grid 5)
 
-         ))
+(defn gradients [state]
+"
+  !Compute and store the exact solution and the gradient.
 
-(defn draw-line
-  [cvs scale [start] [end] y]
-  (let [scale-start (* scale start )
-        scale-end (* scale end )]
-    (-> cvs
-        (cc/line scale-start y scale-end y )
-        (cc/ellipse scale-start y 5 5)
-        (cc/ellipse scale-end y 5 5))))
+  do j = 1, nnodes
+  uexact(j) = sin(pi*x(j))     ! Exact solution at xj
+  pexact(j) = pi*cos(pi*x(j))  ! Exact gradient at xj
+  u(j) = zero             ! Initial solution
+  p(j) = zero             ! Initial gradient
+  end do
+ "
+  (let [singles
+        (map
+         #(hash-map
+           :uexact (nm/sin (* nm/pi %))
+           :pexact (* nm/pi (nm/cos (* nm/pi %)))
+           :v %
+           :u  0
+           :p  0)
+         state)]
 
-(defn draw-lines
-  [canvas wavy-line]
-   (reduce
-    (fn [canvas [start end]] (draw-line canvas 200 start end 100))
-    canvas
-    (partition 2 1 wavy-line)) )
+    (reduce (fn [old new]
+              (-> old
+                  (update :uexact conj (:uexact new))
+                  (update :u conj (:u new))
+                  (update :v conj (:v new))
+                  (update :pexact conj (:pexact new))
+                  (update :p conj (:p new))))
+            {:uexact []
+             :pexact []
+             :v []
+             :u []
+             :p []}
+            singles)))
 
-(partition 2 1 (irregular-grid 10))
 
-(def g (irregular-grid 10))
 
-(defn drawer
-  [canvas window ^long frameno state]
-  (-> canvas
-      (cc/set-background 0 0 0)
-      (cc/set-color 255 255 255)
-      (draw-lines
-       g )))
 
-(def window (cc/show-window
-             {:canvas (cc/canvas 200 200 :mid) ; create canvas with mid quality
-              :window-name "ellipse"           ; name window
-              :w 400                           ; size of window (twice as canvas)
-              :h 400
-              :fps 10
-              :hint :mid ;; hint for drawing canvas on window, mid quality (affects scalling 200 -> 400)
-              :draw-fn  drawer})) ;; draw callback funtion
+(defn bands
+  [state]
+  [(nc/subvector state 1 (dec (nc/dim state)))
+   (nc/subvector state 0 (dec (nc/dim state)))])
 
-(cc/close-window
- window
- )
 
-(comment
-"""
- !Generate a uniform mesh first.
-
-     h = one / real(nnodes-1,dp) ! Mesh spacing of uniform grid
-
-   do j = 1, nnodes
-         x(j) = real(j-1)*h      ! xj = x-coordinate of j-th node
-   end do
-
- !Perturb the nodal coordinates to generate an irregular grid.
-
-   do j = 2, nnodes-1 !<- Perturb only the interior nodes.
-    call random_number(rn)
-    x(j) = half*(x(j+1)+x(j-1)) + 0.25_dp*(rn-half) * half*(x(j+1)-x(j-1))
-   end do
-
- !Compute and store the exact solution and the gradient.
-
-   do j = 1, nnodes
-    uexact(j) = sin(pi*x(j))     ! Exact solution at xj
-    pexact(j) = pi*cos(pi*x(j))  ! Exact gradient at xj
-         u(j) = zero             ! Initial solution
-         p(j) = zero             ! Initial gradient
-   end do
-
+(defn dual-volumes [state]
+  "
  !Compute and store the dual volume around each node.
 
    do j = 2, nnodes-1
     vol(j) = half*( x(j+1)-x(j-1) )
    end do
     vol(1     ) = half*( x(2)-x(1) )
-    vol(nnodes) = half*( x(nnodes)-x(nnodes-1) )
+    vol(nnodes) = half*( x(nnodes)-x(nnodes-1) ) "
+  (let [vols
+        (apply mapv
+               (fn [xp1 xm1]
+                 (* 1/2 (- xp1 xm1)))
+               (bands state))]
+    (conj vols (last vols))))
 
+
+(def t (irregular-grid 10))
+
+
+(bands (irregular-grid 10))
+
+(dual-volumes (irregular-grid 10))
+
+(defn mesh-spacing
+  [volumes count]
+  "
  !Compute the effective mesh spacing: h = L1(vol).
 
     heff = zero
@@ -415,269 +404,309 @@
 
     hmin = minval(vol)
     hmax = maxval(vol)
-
-!--------------------------------------------------------------------------------
-! Compute the pseudo time step.
-
- !--------------------------
- ! 1. Upwind scheme:
- !--------------------------
-  if (scheme_type == 1) then
-
-    Lr = one/(two*pi)               ! Optimal formula for Lr.
-    Tr = Lr*Lr / nu                 ! Relaxation time.
-
-    dtau = 0.99_dp * hmin/(nu/Lr)    ! Pseudo time step (CFL condition).
-
- !   Note: The time step is O(h), not O(h^2). The number of iterations to reach
- !         the steady state will therefore be proportional to 1/h or equivalently
- !         to nnodes. This is orders of magnitude faster than almost all conventional
- !         diffusion schemes for which the number of iterations increases quadratically.
-
- !--------------------------
- ! 2. Conventional finite-difference scheme.
- !--------------------------
-  elseif (scheme_type == 2) then
-
-   dtau = 0.99_dp * hmin*hmin/(two*nu) ! Pseudo time step, typical O(h^2)
-
-  endif
-
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-! Advance in pseudo time to reach the steady state by the forward Euler scheme:
-!  u^{n+1} = u^n + dtau*Residual(u^n).
-
-  pseudo_time_loop : do k = 1, 10000000
-
- !-------------------------------------------------------------------------------
- ! Residual Computation (compute res_u and/or res_p):
- !-------------------------------------------------------------------------------
-
- !--------------------------------------------------------------------
- ! Option 1: First-order diffusion scheme
-
-   scheme_choice : if (scheme_type == 1) then
-
-   !------------------------------------------------------------
-   ! Initialize the nodal residual arrays
-   !------------------------------------------------------------
-
-      res_u = zero
-      res_p = zero
-
-   !------------------------------------------------------------
-   ! Loop over the interior faces, compute the numerical flux.
-   !------------------------------------------------------------
-
-      interior_face_loop : do j = 1, nnodes-1 ! j-th face between j and j+1.
-
-      ! Left and right states.
-
-        uL = u(j)
-        pL = p(j)
-
-        uR = u(j+1)
-        pR = p(j+1)
-
-      ! Compute the numerical flux (upwind flux)
-
-         f(iu) = half*( ( nu*pR + nu*pL )    + nu/Lr*( uR - uL ) )
-         f(ip) = half*( (    uR +    uL )/Tr + nu/Lr*( pR - pL ) )
-
-      ! Add to the left and subtract from the right for Res = f_{j+1/2}-f_{j=1/2}.
-
-        res_u(j  ) = res_u(j  ) + f(iu)
-        res_p(j  ) = res_p(j  ) + f(ip)
-
-        res_u(j+1) = res_u(j+1) - f(iu)
-        res_p(j+1) = res_p(j+1) - f(ip)
-
-      end do interior_face_loop
-
-   !------------------------------------------------------------
-   ! Fluxes through the domain boundaries to close the residuals.
-   ! Note: Weak boundary condition is applied.
-   !------------------------------------------------------------
-
-     !-------------------------------------------
-     ! Left boundary
-     !-------------------------------------------
-
-         j = 1
-
-        uL = 0.0  !<- Boundary condition: u(0)=0.
-        pL = p(j) !<- No boundary condition: copy from the right.
-
-        uR = u(j)
-        pR = p(j)
-
-       !Compute the numerical flux (upwind flux)
-
-         f(iu) = half*( ( nu*pR + nu*pL )    + nu/Lr*( uR - uL ) )
-         f(ip) = half*( (    uR +    uL )/Tr + nu/Lr*( pR - pL ) )
-
-       !Subtract from the resisual at node 1.
-
-        res_u(j) = res_u(j) - f(iu)
-        res_p(j) = res_p(j) - f(ip)
-
-     !-------------------------------------------
-     ! Right boundary
-     !-------------------------------------------
-
-         j = nnodes
-
-        uL = u(j)
-        pL = p(j)
-
-        uR = 0.0  !<- Boundary condition: u(1)=0.
-        pR = pL   !<- No boundary condition: copy from the left.
-
-       !Compute the numerical flux (upwind flux)
-
-         f(iu) = half*( ( nu*pR + nu*pL )    + nu/Lr*( uR - uL ) )
-         f(ip) = half*( (    uR +    uL )/Tr + nu/Lr*( pR - pL ) )
-
-       !Add it to the resisual at node nnodes.
-
-        res_u(j) = res_u(j) + f(iu)
-        res_p(j) = res_p(j) + f(ip)
-
-   !------------------------------------------------------------
-   ! Add source terms, and finish the residual calculation.
-   !------------------------------------------------------------
-
-       do j = 1, nnodes
-        res_u(j) = res_u(j) + nu*pi*pi*sin(pi*x(j))*vol(j)
-        res_p(j) = res_p(j) - p(j)/Tr*vol(j)
-       end do
-
- !--------------------------------------------------------------------
-
-   else scheme_choice
-
- !--------------------------------------------------------------------
- ! Option 2: Conventional finite-difference scheme.
- !           This is a 3-point FD scheme, which is 2nd-order on uniform mesh.
- !           It is first-order on irregular mesh.
-
-    res_p = zero ! Gradient, p, is not computed.
-
-    node_loop : do j = 2, nnodes-1 ! j-th interior node
-
-     res_u(j) = nu*( u(j+1) - two*u(j) + u(j-1) )/h + nu*pi*pi*sin(pi*x(j))*h
-
-    end do node_loop
- !--------------------------------------------------------------------
-
-
-   end if scheme_choice
- !--------------------------------------------------------------------
-
- !-------------------------------------------------------------------------------
- !-------------------------------------------------------------------------------
- !  Check convergence: see if res_u and res_p are small enough.
- !-------------------------------------------------------------------------------
- !-------------------------------------------------------------------------------
-
-!     Compute the maximum nodal residual (to check the convergence)
-      res_max = max( maxval(abs(res_u)), maxval(abs(res_p)) )
-
-!     Stop if the tolerance (say, 1.0e-08) is reached.
-      if ( res_max < 1.0e-08_dp ) exit pseudo_time_loop
-
-!     Display the max nodal residual at every 100 iterations
-      if (mod(k,500) == 0) then
-        write(*,'(a5,i10,a20,es12.5)') "Itr =", k, "   Max(nodal res) = ", res_max
-      endif
-
- !-------------------------------------------------------------------------------
- !-------------------------------------------------------------------------------
- ! Update the solution by the forward Euler scheme.
- !-------------------------------------------------------------------------------
- !-------------------------------------------------------------------------------
-
-            u = u + (dtau/h)*res_u
-            p = p + (dtau/h)*res_p
-
- !-------------------------------------------------------------------------------
- !-------------------------------------------------------------------------------
- ! Apply strong boundary condition for the conventional scheme.
- !-------------------------------------------------------------------------------
- !-------------------------------------------------------------------------------
-
-   if (scheme_type == 2) then
-         u(1) = zero ! BC at x=0
-    u(nnodes) = zero ! BC at x=1
-   endif
-
-
-  end do pseudo_time_loop
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-
-!--------------------------------------------------------------------------------
-!  Steady state is reached.
-!--------------------------------------------------------------------------------
-
-   write(*,'(a5,i10,a20,es12.5)') "Itr =", k-1, "   Max(nodal res) = ", res_max
-
-!--------------------------------------------------------------------------------
-! Display the results
-!--------------------------------------------------------------------------------
-
- !---------------------------------------------------------------
- ! 1. First-order diffusion scheme
- !---------------------------------------------------------------
-
-  if (scheme_type == 1) then
-  !-----------------------------------------------------
-  ! Compute the gradient by finite-difference formulas.
-
-    do j = 2, nnodes-1 ! j-th interior node
-     p(j) = ( u(j+1)-u(j-1) )/( x(j+1)-x(j-1) ) !<- Central formula.
-    end do
-     p(1     ) = ( u(2)     -u(1)        )/( x(2)     -x(1)        ) !<- One-sided formula at j=1.
-     p(nnodes) = ( u(nnodes)-u(nnodes-1) )/( x(nnodes)-x(nnodes-1) ) !<- One-sided formula at j=nnodes.
-  !-----------------------------------------------------
- !---------------------------------------------------------------
- ! 2. Conventional finite-difference scheme
- !---------------------------------------------------------------
-
-  elseif (scheme_type == 2) then
-
-  !-----------------------------------------------------
-  !Compute the gradient by finite-difference formulas.
-
-    do j = 2, nnodes-1 ! j-th interior node
-     p(j) = ( u(j+1)-u(j-1) )/( x(j+1)-x(j-1) ) !<- Central formula.
-    end do
-     p(1     ) = ( u(2)     -u(1)        )/( x(2)     -x(1)        ) !<- One-sided formula at j=1.
-     p(nnodes) = ( u(nnodes)-u(nnodes-1) )/( x(nnodes)-x(nnodes-1) ) !<- One-sided formula at j=nnodes.
-  !-----------------------------------------------------
-
-!  L_infinity Errors:
-  endif
-
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-!--------------------------------------------------------------------------------
-
- stop
-
- end program oned_first_order_diffusion_scheme
-
+"
+  (let [vs (nn/dv volumes)]
+    {:heff
+     (/
+      (reduce
+       (fn [heff vol]
+         (+ heff vol)) 0 volumes)
+      count)
+     :hmin (nth volumes (nc/imin vs))
+     :hmax (nth volumes (nc/imax vs))}))
+
+(mesh-spacing (dual-volumes (irregular-grid 10))
+
+              10)
+
+(defn upwind-baby
+  [x vols
+   {:keys [hmin hmax heff] :as spacing}
+   {:keys [u p uexact pexact] :as gradients}]
+
+
+  (println "X")
+  (clojure.pprint/pprint x)
   
-""")
+  (println "Vols")
+  (clojure.pprint/pprint vols)
 
-(defn foo
-"I don't do a whole lot."
-[x]
-(println x "Hello, World!"))
+  (println "u")
+  (clojure.pprint/pprint u)
+
+  (println "p")
+  (clojure.pprint/pprint p)
+
+  (println "grad")
+  (clojure.pprint/pprint gradients)
+  (let [iu 0
+        ip 1
+        nu 1.0
+        u (nn/dv u)
+        p (nn/dv p)
+        Lr (/ 1.0 (* 2.0 nm/pi))
+        Tr (/ (* Lr Lr ) nu)
+        vols (nn/dv vols)
+        nnodes (nc/dim x)
+        dtau (* 0.99 (/ hmin (/ nu Lr)))
+        res_u (nn/dv (take nnodes (repeat 0.0)))
+        res_p (nn/dv (take nnodes (repeat 0.0)))
+        f (nn/dv [0 0])]
+    (loop [pesudotime (range 10000000)
+           x x
+           u u
+           p p
+           f f
+           res_u res_u
+           res_p res_p]
+      ;; interior_face_loop : do j = 1, nnodes-1 ! j-th face between j and j+1.
+      ;; ! Left and right states.
+      ;; uL = u(j)
+      ;; pL = p(j)
+
+      ;; uR = u(j+1)
+      ;; pR = p(j+1)
+
+      ;; ! Compute the numerical flux (upwind flux)
+
+      ;; f(iu) = half*( ( nu*pR + nu*pL )    + nu/Lr*( uR - uL ) )
+      ;; f(ip) = half*( (    uR +    uL )/Tr + nu/Lr*( pR - pL ) )
+
+      ;; ! Add to the left and subtract from the right for Res = f_{j+1/2}-f_{j=1/2}.
+
+      ;; res_u(j  ) = res_u(j  ) + f(iu)
+      ;; res_p(j  ) = res_p(j  ) + f(ip)
+
+      ;; res_u(j+1) = res_u(j+1) - f(iu)
+      ;; res_p(j+1) = res_p(j+1) - f(ip)
+
+      ;; end do interior_face_loop
+
+      (do
+        (for [index (range nnodes)]
+          (let [uL (nth u index)
+                pL (nth p index)
+                uR (nth u (inc index))
+                pR (nth p (inc index))
+                newiu (* 1/2 (+ (* nu pR) (* nu pL)
+                                (/ nu (* Lr (- uR uL)))))
+                newip (* 1/2 (+       uR         uL
+                                      (/ nu (* Lr (- pR pL)))))
+
+                new_res_u_l  (+ (nc/entry res_u index) newiu)
+                new_res_p_l  (+ (nc/entry res_p index) newip)
+                new_res_u_r  (- (nc/entry res_u (inc index)) newiu)
+                new_res_p_r  (- (nc/entry res_u (inc index)) newip)
+                ]
+            (do
+              (clojure.pprint/pprint u)
+              (clojure.pprint/pprint p)
+              (clojure.pprint/pprint f)
+              (clojure.pprint/pprint res_u)
+              (clojure.pprint/pprint res_p))
+            (nc/entry! f iu newiu)
+            (nc/entry! f ip newip)
+            (nc/entry! res_u index new_res_u_l)
+            (nc/entry! res_p index new_res_p_l)
+            (nc/entry! res_u (inc index) new_res_u_r)
+            (nc/entry! res_p (inc index) new_res_p_r)))
+
+        ;; !------------------------------------------------------------
+        ;; ! Fluxes through the domain boundaries to close the residuals.
+        ;; ! Note: Weak boundary condition is applied.
+        ;; !------------------------------------------------------------
+
+        ;;   !-------------------------------------------
+        ;;   ! Left boundary
+        ;;   !-------------------------------------------
+
+        ;;       j = 1
+
+        ;;      uL = 0.0  !<- Boundary condition: u(0)=0.
+        ;;      pL = p(j) !<- No boundary condition: copy from the right.
+
+        ;;      uR = u(j)
+        ;;      pR = p(j)
+
+        ;;     !Compute the numerical flux (upwind flux)
+
+        ;;       f(iu) = half*( ( nu*pR + nu*pL )    + nu/Lr*( uR - uL ) )
+        ;;       f(ip) = half*( (    uR +    uL )/Tr + nu/Lr*( pR - pL ) )
+
+        ;;     !Subtract from the resisual at node 1.
+
+        ;;      res_u(j) = res_u(j) - f(iu)
+        ;;      res_p(j) = res_p(j) - f(ip)
+
+        (let [j 0
+              uL 0.0
+              pL (nc/entry p j)
+              uR (nc/entry u j)
+              pR (nc/entry p j)
+              fiu   (* 1/2 (+ (* nu pR) (* nu pL)
+                              (/ nu (* Lr (- uR uL)))))
+              fip (* 1/2 (+ (/ (+ uR    uL) Tr)
+                            (/ nu (* Lr (- pR pL)))))
+
+              new_res_u_j  (- (nc/entry res_u j) fiu)
+              new_res_p_j  (- (nc/entry res_u j) fip)
+              ]
+          (do
+            (clojure.pprint/pprint u)
+            (clojure.pprint/pprint p)
+            (clojure.pprint/pprint f)
+            (clojure.pprint/pprint res_u)
+            (clojure.pprint/pprint res_p)
+            )
+          (nc/entry! f iu fiu)
+          (nc/entry! f ip fip)
+          (nc/entry! res_u j new_res_u_j)
+          (nc/entry! res_p j new_res_p_j))
+        ;;   !-------------------------------------------
+        ;;   ! Right boundary
+        ;;   !-------------------------------------------
+
+        ;;       j = nnodes
+
+        ;;      uL = u(j)
+        ;;      pL = p(j)
+
+        ;;      uR = 0.0  !<- Boundary condition: u(1)=0.
+        ;;      pR = pL   !<- No boundary condition: copy from the left.
+
+        ;;     !Compute the numerical flux (upwind flux)
+
+        ;;       f(iu) = half*( ( nu*pR + nu*pL )    + nu/Lr*( uR - uL ) )
+        ;;       f(ip) = half*( (    uR +    uL )/Tr + nu/Lr*( pR - pL ) )
+
+        ;;     !Add it to the resisual at node nnodes.
+
+        ;;      res_u(j) = res_u(j) + f(iu)
+        ;;      res_p(j) = res_p(j) + f(ip)
+
+        (let [j (dec nnodes)
+              uL (nc/entry u j)
+              pL (nc/entry p j)
+              uR 0.0
+              pR uL
+              fiu (* 1/2 (+ (* nu pR) (* nu pL)
+                            (/ nu (* Lr (- uR uL)))))
+              fip (* 1/2 (+ (/ (+ uR    uL) Tr)
+                            (/ nu (* Lr (- pR pL)))))
+
+              new_res_u_j  (+ (nc/entry res_u j) fiu)
+              new_res_p_j  (+ (nc/entry res_u j) fip)
+              ]
+          (do
+            (clojure.pprint/pprint u)
+            (clojure.pprint/pprint p)
+            (clojure.pprint/pprint f)
+            (clojure.pprint/pprint res_u)
+            (clojure.pprint/pprint res_p)
+            )
+          (nc/entry! f iu fiu)
+          (nc/entry! f ip fip)
+          (nc/entry! res_u j new_res_u_j)
+          (nc/entry! res_p j new_res_p_j))
+        ;; !------------------------------------------------------------
+        ;; ! Add source terms, and finish the residual calculation.
+        ;; !------------------------------------------------------------
+        (doseq [j (range nnodes)]
+          (let [new_res_u (+ (nc/entry res_u j)
+                             (* nu nm/pi nm/pi
+                                (nm/sin (* nm/pi (nc/entry x j)) )
+                                (nc/entry vols j)))
+                new_res_p (- (nc/entry res_p j)
+                             (/ (nc/entry p j) Tr
+                                (nc/entry vols j)))]
+            (println (nc/entry res_u))
+            (println new_res_p)
+            (clojure.pprint/pprint (nc/entry x j))
+
+            (nc/entry! res_u new_res_u)
+            (nc/entry! res_p new_res_p)))
+
+        ;;     do j = 1, nnodes
+        ;;      res_u(j) = res_u(j) + nu*pi*pi*sin(pi*x(j))*vol(j)
+        ;;      res_p(j) = res_p(j) - p(j)/Tr*vol(j)
+        ;;     end do
+
+
+
+        ;;  !-------------------------------------------------------------------------------
+        ;;  !-------------------------------------------------------------------------------
+        ;;  !  Check convergence: see if res_u and res_p are small enough.
+        ;;  !-------------------------------------------------------------------------------
+        ;;  !-------------------------------------------------------------------------------
+
+        ;; !     Compute the maximum nodal residual (to check the convergence)
+        ;;       res_max = max( maxval(abs(res_u)), maxval(abs(res_p)) )
+
+
+        (do
+         (let [res_max (max (nc/amax res_u) (nc/amax res_p))]
+
+
+            ;; !     Stop if the tolerance (say, 1.0e-08) is reached.
+            ;;       if ( res_max < 1.0e-08_dp ) exit pseudo_time_loop
+
+            ;; !     Display the max nodal residual at every 100 iterations
+            ;;       if (mod(k,500) == 0) then
+            ;;         write(*,'(a5,i10,a20,es12.5)') \"Itr =\", k, \"   Max(nodal res) = \", res_max
+            ;;       endif
+
+            ;;  !-------------------------------------------------------------------------------
+            ;;  !-------------------------------------------------------------------------------
+            ;;  ! Update the solution by the forward Euler scheme.
+            ;;  !-------------------------------------------------------------------------------
+            ;;  !-------------------------------------------------------------------------------
+
+            ;;             u = u + (dtau/h)*res_u
+            ;;             p = p + (dtau/h)*res_p
+
+            (if (and
+                 (> 1.0e-08 res_max)
+                 (< pesudotime 10000000))
+              (let []
+                (nc/axpby! 1.0 u (/ dtau heff) res_u)
+                (nc/axpby! 1.0 p (/ dtau heff) res_p)
+                (when (= 0 (mod pesudotime 500))
+                  (do
+                    (clojure.pprint/pprint u)
+                    (clojure.pprint/pprint p)
+                    (clojure.pprint/pprint f)
+                    (clojure.pprint/pprint res_u)
+                    (clojure.pprint/pprint res_p)
+                    (println res_max)))
+                (recur
+                 (inc pesudotime)
+                 x
+                 u
+                 p
+                 f
+                 res_u
+                 res_p))
+
+              (do
+                (clojure.pprint/pprint u)
+                (clojure.pprint/pprint p)
+                (clojure.pprint/pprint f)
+                (clojure.pprint/pprint res_u)
+                (clojure.pprint/pprint res_p)
+                (println res_max))
+              )))))))
+
+(let [x (irregular-grid 10)
+      vols (dual-volumes x)
+      spacing (mesh-spacing vols 10)
+      gradients (gradients x)]
+
+  (upwind-baby
+   x vols spacing gradients))
+
+
+(count (dual-volumes (irregular-grid 10)))
+
+
+
+(dual-volumes (irregular-grid 10))
