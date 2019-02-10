@@ -1,5 +1,9 @@
 {:deps
  {uncomplicate/neanderthal {:mvn/version "0.21.0"}
   nrepl {:mvn/version "0.5.3"}
+  org.clojure/clojure {:mvn/version "1.10.0"}
+  org.clojure/core.async {:mvn/version "0.4.490"}
   org.clojure/test.check {:mvn/version "0.9.0"}
-  clojure2d {:mvn/version "1.1.0"}}}
+  clojure2d {:mvn/version "1.1.0"}
+  com.cognitect/rebl {:local/root "/home/eric/REBL/REBL-0.9.109/REBL-0.9.109.jar"}
+  }}

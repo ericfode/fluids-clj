@@ -2,6 +2,7 @@
   (:require
    [fluids.gen :as g]
 
+   [clojure.datafy :as d]
    [clojure.spec.alpha :as s]
    [clojure.spec.test.alpha :as st]
    [clojure.spec.gen.alpha :as gen]
@@ -424,21 +425,14 @@
    {:keys [hmin hmax heff] :as spacing}
    {:keys [u p uexact pexact] :as gradients}]
 
+  (tap>
+   {"X" x
+    "Vols" vols
+    "U" u
+    "P" p
+    "grad" gradients
+    :stage :warm-up})
 
-  (println "X")
-  (clojure.pprint/pprint x)
-  
-  (println "Vols")
-  (clojure.pprint/pprint vols)
-
-  (println "u")
-  (clojure.pprint/pprint u)
-
-  (println "p")
-  (clojure.pprint/pprint p)
-
-  (println "grad")
-  (clojure.pprint/pprint gradients)
   (let [iu 0
         ip 1
         nu 1.0
@@ -499,17 +493,32 @@
                 new_res_p_r  (- (nc/entry res_u (inc index)) newip)
                 ]
             (do
-              (clojure.pprint/pprint u)
-              (clojure.pprint/pprint p)
-              (clojure.pprint/pprint f)
-              (clojure.pprint/pprint res_u)
-              (clojure.pprint/pprint res_p))
+              (tap>
+               {"X" x
+                "Vols" vols
+                "U" u
+                "P" p
+                "F" f
+                "newiu" newiu
+                "uL"  uL
+                "pL" pL
+                "uR" uR
+                "newip" newip
+                "res_u" res_u
+                "res_p" res_p
+                "grad" gradients
+                :stage :pre-middle}))
             (nc/entry! f iu newiu)
             (nc/entry! f ip newip)
             (nc/entry! res_u index new_res_u_l)
             (nc/entry! res_p index new_res_p_l)
             (nc/entry! res_u (inc index) new_res_u_r)
-            (nc/entry! res_p (inc index) new_res_p_r)))
+            (nc/entry! res_p (inc index) new_res_p_r)
+            (tap>
+             {"res_u" res_u
+              "res_p" res_p
+              "f"     f
+              :stage :post-middle})))
 
         ;; !------------------------------------------------------------
         ;; ! Fluxes through the domain boundaries to close the residuals.
@@ -619,7 +628,7 @@
                 new_res_p (- (nc/entry res_p j)
                              (/ (nc/entry p j) Tr
                                 (nc/entry vols j)))]
-            (println (nc/entry res_u))
+            (tap> {"res_u" new_res_u})
             (println new_res_p)
             (clojure.pprint/pprint (nc/entry x j))
 
@@ -701,12 +710,12 @@
       spacing (mesh-spacing vols 10)
       gradients (gradients x)]
 
-  (upwind-baby
-   x vols spacing gradients))
+      (upwind-baby x vols spacing gradients)
+  )
 
 
-(count (dual-volumes (irregular-grid 10)))
+;(count (dual-volumes (irregular-grid 10)))
 
 
 
-(dual-volumes (irregular-grid 10))
+;(dual-volumes (irregular-grid 10))
